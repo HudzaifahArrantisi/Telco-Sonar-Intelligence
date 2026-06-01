@@ -1,0 +1,18 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+group = 'com.telcorf.telephony'
+version = '0.1.0'
+
+android {
+  namespace 'com.telcorf.telephony'
+  compileSdk 35
+
+  defaultConfig {
+    minSdk 23
+  }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+}
