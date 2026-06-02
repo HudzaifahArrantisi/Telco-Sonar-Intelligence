@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { HUD } from "@/theme/hud";
 import { TelephonyCell } from "@/types/telephony";
 import { formatValue } from "@/utils/signal";
 
@@ -11,11 +12,11 @@ type Props = {
 };
 
 function networkBadgeColor(networkType: string | undefined): string {
-  if (!networkType) return "#7E8A99";
-  if (networkType.includes("5G")) return "#A855F7";
-  if (networkType === "LTE" || networkType === "4G") return "#22C55E";
-  if (networkType === "WCDMA") return "#3B82F6";
-  return "#7E8A99";
+  if (!networkType) return HUD.colors.textMuted;
+  if (networkType.includes("5G")) return HUD.colors.cyan;
+  if (networkType === "LTE" || networkType === "4G") return HUD.colors.text;
+  if (networkType === "WCDMA") return HUD.colors.amber;
+  return HUD.colors.textMuted;
 }
 
 function MetricRow({ label, value }: { label: string; value: string }) {
@@ -107,10 +108,10 @@ type WifiProps = {
 
 export function WifiCard({ ssid }: WifiProps) {
   return (
-    <View style={[styles.card, { flex: 1, borderColor: "#3B82F6", borderWidth: 1.5 }]}>
+    <View style={[styles.card, { flex: 1, borderColor: HUD.colors.cyan, borderWidth: 1.5 }]}>
       <View style={styles.cardHeader}>
         <Text style={styles.simTitle}>WiFi</Text>
-        <View style={[styles.networkBadge, { backgroundColor: "#3B82F6" }]}>
+        <View style={[styles.networkBadge, { backgroundColor: HUD.colors.cyan }]}>
           <Text style={styles.networkBadgeText}>WiFi</Text>
         </View>
       </View>
@@ -128,9 +129,10 @@ export function WifiCard({ ssid }: WifiProps) {
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: "#0B1B26",
-    borderColor: "#1C3544",
-    borderRadius: 10,
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flex: 1,
     padding: 10,
@@ -147,7 +149,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   simTitle: {
-    color: "#778899",
+    color: HUD.colors.textMuted,
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 0.5,
@@ -158,31 +160,32 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   networkBadgeText: {
-    color: "#FFFFFF",
+    color: HUD.colors.bg,
+    fontFamily: HUD.fonts.mono,
     fontSize: 9,
     fontWeight: "900",
   },
   operator: {
-    color: "#F7FBFF",
+    color: HUD.colors.text,
     fontSize: 14,
     fontWeight: "900",
     marginBottom: 2,
   },
   subtitle: {
-    color: "#5A7A8A",
+    color: HUD.colors.amber,
     fontSize: 8,
     fontWeight: "800",
     letterSpacing: 1,
     marginBottom: 8,
   },
   noSim: {
-    color: "#778899",
+    color: HUD.colors.textMuted,
     fontSize: 14,
     fontWeight: "800",
     marginTop: 8,
   },
   noSimHint: {
-    color: "#4A6070",
+    color: HUD.colors.textDim,
     fontSize: 10,
     lineHeight: 16,
     marginTop: 6,
@@ -197,19 +200,22 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   metricRow: {
-    backgroundColor: "#081520",
+    backgroundColor: HUD.colors.bgAlt,
+    borderColor: "rgba(0, 240, 255, 0.1)",
     borderRadius: 4,
+    borderWidth: 1,
     paddingHorizontal: 6,
     paddingVertical: 4,
   },
   metricLabel: {
-    color: "#5A7A8A",
+    color: HUD.colors.textMuted,
     fontSize: 8,
     fontWeight: "800",
     letterSpacing: 0.3,
   },
   metricValue: {
-    color: "#D7E1EA",
+    color: HUD.colors.text,
+    fontFamily: HUD.fonts.mono,
     fontSize: 11,
     fontWeight: "900",
     marginTop: 1,

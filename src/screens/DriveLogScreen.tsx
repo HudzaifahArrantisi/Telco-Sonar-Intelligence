@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { FlatList, StyleSheet, Text, View } from "react-native";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { clearLogs, exportLogsCsv, getLogs } from "@/storage/logStore";
+import { HUD } from "@/theme/hud";
 import { DriveLog } from "@/types/telephony";
 import { formatValue } from "@/utils/signal";
 
@@ -22,7 +23,7 @@ export function DriveLogScreen() {
     <View style={styles.screen}>
       <View style={styles.header}>
         <Text style={styles.title}>Drive Test Log</Text>
-        <PrimaryButton title="Export CSV" icon={<Ionicons name="download" size={16} color="#fff" />} onPress={() => void exportLogsCsv().then(setExportPath)} />
+        <PrimaryButton title="Export CSV" icon={<Ionicons name="download" size={16} color={HUD.colors.text} />} onPress={() => void exportLogsCsv().then(setExportPath)} />
       </View>
       {exportPath ? <Text style={styles.path}>CSV saved: {exportPath}</Text> : null}
       <View style={styles.actions}>
@@ -60,14 +61,21 @@ export function DriveLogScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { backgroundColor: "#061017", flex: 1, padding: 16 },
+  screen: { backgroundColor: HUD.colors.bg, flex: 1, padding: 16 },
   header: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
-  title: { color: "#F7FBFF", fontSize: 24, fontWeight: "900" },
+  title: { color: HUD.colors.text, fontSize: 24, fontWeight: "900" },
   actions: { flexDirection: "row", gap: 10, marginVertical: 12 },
   list: { gap: 10, paddingBottom: 32 },
-  row: { backgroundColor: "#0C1A24", borderColor: "#183341", borderRadius: 8, borderWidth: 1, padding: 12 },
-  rowTitle: { color: "#F7FBFF", fontSize: 13, fontWeight: "800" },
-  rowText: { color: "#AAB7C4", fontSize: 12, lineHeight: 18, marginTop: 3 },
-  empty: { color: "#8795A6", marginTop: 24, textAlign: "center" },
-  path: { color: "#8FE35F", fontSize: 12, marginTop: 12 }
+  row: {
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    padding: 12
+  },
+  rowTitle: { color: HUD.colors.phosphor, fontFamily: HUD.fonts.mono, fontSize: 13, fontWeight: "800" },
+  rowText: { color: HUD.colors.phosphor, fontFamily: HUD.fonts.mono, fontSize: 12, lineHeight: 18, marginTop: 3 },
+  empty: { color: HUD.colors.phosphor, fontFamily: HUD.fonts.mono, marginTop: 24, textAlign: "center" },
+  path: { color: HUD.colors.phosphor, fontFamily: HUD.fonts.mono, fontSize: 12, marginTop: 12 }
 });

@@ -13,15 +13,15 @@ export function getSignalStatus(cell?: TelephonyCell | null): SignalStatus {
 export function getSignalColor(status: SignalStatus): string {
   switch (status) {
     case "Excellent":
-      return "#1FE0A2";
+      return "#FFFFFF";
     case "Good":
-      return "#8FE35F";
+      return "#D7D7D7";
     case "Fair":
-      return "#FFB84D";
+      return "#B8B8B8";
     case "Poor":
-      return "#FF5F6D";
+      return "#8A8A8A";
     default:
-      return "#7E8A99";
+      return "#A7A7A7";
   }
 }
 

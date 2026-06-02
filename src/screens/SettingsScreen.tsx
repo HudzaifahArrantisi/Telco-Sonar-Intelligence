@@ -2,6 +2,7 @@ import Slider from "@react-native-community/slider";
 import { StyleSheet, Switch, Text, View } from "react-native";
 import { PrimaryButton } from "@/components/PrimaryButton";
 import { clearLogs, exportLogsCsv } from "@/storage/logStore";
+import { HUD } from "@/theme/hud";
 import { Settings } from "@/types/telephony";
 
 type Props = {
@@ -47,20 +48,9 @@ export function SettingsScreen({ settings, onChange }: Props) {
         <Switch
           value={settings.loggingEnabled}
           onValueChange={(value) => update({ loggingEnabled: value })}
-          trackColor={{ true: "#0FB9A8", false: "#334A58" }}
-          thumbColor="#F7FBFF"
+          trackColor={{ true: HUD.colors.cyan, false: HUD.colors.border }}
+          thumbColor={settings.loggingEnabled ? HUD.colors.bg : HUD.colors.text}
         />
-      </View>
-      <View style={styles.toggle}>
-        <View>
-          <Text style={styles.label}>Theme mode</Text>
-          <Text style={styles.help}>Dark mode is optimized for field engineering work.</Text>
-        </View>
-        <Text style={styles.value}>{settings.themeMode}</Text>
-      </View>
-      <View style={styles.actions}>
-        <PrimaryButton title="Export Logs" onPress={() => void exportLogsCsv()} />
-        <PrimaryButton title="Clear Logs" tone="danger" onPress={() => void clearLogs()} />
       </View>
     </View>
   );
@@ -90,30 +80,38 @@ function SettingSlider({
         maximumValue={max}
         step={step}
         onValueChange={onChange}
-        minimumTrackTintColor="#40E0C9"
-        maximumTrackTintColor="#334A58"
-        thumbTintColor="#F7FBFF"
+        minimumTrackTintColor={HUD.colors.cyan}
+        maximumTrackTintColor={HUD.colors.border}
+        thumbTintColor={HUD.colors.amber}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { backgroundColor: "#061017", flex: 1, gap: 16, padding: 16 },
-  title: { color: "#F7FBFF", fontSize: 24, fontWeight: "900" },
-  block: { backgroundColor: "#0C1A24", borderColor: "#183341", borderRadius: 8, borderWidth: 1, padding: 14 },
-  label: { color: "#F7FBFF", fontSize: 14, fontWeight: "800" },
-  help: { color: "#8795A6", fontSize: 12, marginTop: 4, maxWidth: 230 },
+  screen: { backgroundColor: HUD.colors.bg, flex: 1, gap: 16, padding: 16 },
+  title: { color: HUD.colors.text, fontSize: 24, fontWeight: "900" },
+  block: {
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    padding: 14
+  },
+  label: { color: HUD.colors.text, fontSize: 14, fontWeight: "800" },
+  help: { color: HUD.colors.textMuted, fontSize: 12, marginTop: 4, maxWidth: 230 },
   toggle: {
+    ...HUD.glow.panel,
     alignItems: "center",
-    backgroundColor: "#0C1A24",
-    borderColor: "#183341",
-    borderRadius: 8,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flexDirection: "row",
     justifyContent: "space-between",
     padding: 14
   },
-  value: { color: "#40E0C9", fontWeight: "900" },
+  value: { color: HUD.colors.cyan, fontFamily: HUD.fonts.mono, fontWeight: "900" },
   actions: { gap: 10 }
 });

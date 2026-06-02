@@ -1,12 +1,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import { StyleSheet, Text, View } from "react-native";
 import { PrimaryButton } from "@/components/PrimaryButton";
+import { HUD } from "@/theme/hud";
 
 export function PermissionScreen({ onRequest }: { onRequest: () => void }) {
   return (
     <View style={styles.container}>
       <View style={styles.iconWrap}>
-        <Ionicons name="radio-outline" size={42} color="#40E0C9" />
+        <Ionicons name="radio-outline" size={42} color={HUD.colors.cyan} />
       </View>
       <Text style={styles.title}>Telco RF Monitor</Text>
       <Text style={styles.body}>
@@ -27,28 +28,31 @@ export function PermissionScreen({ onRequest }: { onRequest: () => void }) {
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: "#061017",
+    backgroundColor: HUD.colors.bg,
     flex: 1,
     justifyContent: "center",
     padding: 24
   },
   iconWrap: {
+    ...HUD.glow.cyan,
     alignItems: "center",
-    backgroundColor: "#0D222C",
-    borderRadius: 8,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
     height: 74,
     justifyContent: "center",
     marginBottom: 22,
     width: 74
   },
   title: {
-    color: "#F7FBFF",
+    color: HUD.colors.text,
     fontSize: 31,
     fontWeight: "900",
     letterSpacing: 0
   },
   body: {
-    color: "#B9C4CF",
+    color: HUD.colors.textMuted,
     fontSize: 15,
     lineHeight: 22,
     marginTop: 12
@@ -58,12 +62,12 @@ const styles = StyleSheet.create({
     marginVertical: 22
   },
   item: {
-    color: "#D7E1EA",
+    color: HUD.colors.text,
     fontSize: 13,
     lineHeight: 19
   },
   note: {
-    color: "#8795A6",
+    color: HUD.colors.textMuted,
     fontSize: 12,
     lineHeight: 18,
     marginTop: 16

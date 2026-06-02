@@ -1,4 +1,5 @@
 import { StyleSheet, Text, View } from "react-native";
+import { HUD } from "@/theme/hud";
 import { SignalStatus } from "@/types/telephony";
 import { getSignalColor } from "@/utils/signal";
 
@@ -14,8 +15,9 @@ export function SignalBadge({ status }: { status: SignalStatus }) {
 
 const styles = StyleSheet.create({
   badge: {
+    ...HUD.glow.cyan,
     alignItems: "center",
-    borderRadius: 999,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flexDirection: "row",
     gap: 7,
@@ -28,7 +30,8 @@ const styles = StyleSheet.create({
     width: 8
   },
   text: {
+    fontFamily: HUD.fonts.mono,
     fontSize: 12,
-    fontWeight: "800"
+    fontWeight: "900"
   }
 });

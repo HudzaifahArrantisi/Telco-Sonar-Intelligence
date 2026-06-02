@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
 import { Pressable, StyleSheet, Text } from "react-native";
+import { HUD } from "@/theme/hud";
 
 type Props = {
   title: string;
@@ -28,8 +29,11 @@ export function PrimaryButton({ title, onPress, tone = "primary", icon }: Props)
 
 const styles = StyleSheet.create({
   button: {
+    ...HUD.glow.panel,
     alignItems: "center",
-    borderRadius: 8,
+    borderColor: HUD.colors.borderStrong,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
     flexDirection: "row",
     gap: 8,
     justifyContent: "center",
@@ -37,20 +41,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14
   },
   primary: {
-    backgroundColor: "#0FB9A8"
+    backgroundColor: HUD.colors.cyanSoft
   },
   secondary: {
-    backgroundColor: "#162B38"
+    backgroundColor: HUD.colors.panelElevated
   },
   danger: {
-    backgroundColor: "#C44757"
+    backgroundColor: "rgba(255, 122, 0, 0.16)",
+    borderColor: HUD.colors.amberStrong
   },
   pressed: {
     opacity: 0.75
   },
   text: {
-    color: "#F5FBFF",
+    color: HUD.colors.text,
     fontSize: 14,
-    fontWeight: "800"
+    fontWeight: "900"
   }
 });

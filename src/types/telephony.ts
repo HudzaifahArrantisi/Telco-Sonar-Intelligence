@@ -51,6 +51,19 @@ export type DriveLog = {
   altitude?: number | null;
 };
 
+export type SweetSpot = {
+  id?: number;
+  name: string;
+  timestamp: number;
+  latitude: number;
+  longitude: number;
+  operator: string;
+  rsrp: number | null;
+  rsrq: number | null;
+  pci: string | null;
+  score: number;
+};
+
 export type Settings = {
   updateIntervalSeconds: number;
   defaultBeamwidth: number;

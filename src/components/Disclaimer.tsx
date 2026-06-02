@@ -1,4 +1,5 @@
 import { StyleSheet, Text, View } from "react-native";
+import { HUD } from "@/theme/hud";
 
 export function Disclaimer() {
   return (
@@ -13,14 +14,15 @@ export function Disclaimer() {
 
 const styles = StyleSheet.create({
   box: {
-    backgroundColor: "#111F2A",
-    borderColor: "#27485A",
-    borderRadius: 8,
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     padding: 12
   },
   text: {
-    color: "#AAB7C4",
+    color: HUD.colors.textMuted,
     fontSize: 12,
     lineHeight: 17
   }

@@ -3,6 +3,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { initLogStore } from "@/storage/logStore";
+import { HUD } from "@/theme/hud";
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -21,11 +22,14 @@ export default function RootLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: "#40E0C9",
-        tabBarInactiveTintColor: "#718091",
+        tabBarActiveTintColor: HUD.colors.cyan,
+        tabBarInactiveTintColor: HUD.colors.textMuted,
         tabBarStyle: {
-          backgroundColor: "#07131D",
-          borderTopColor: "#183341"
+          backgroundColor: HUD.colors.bgAlt,
+          borderTopColor: HUD.colors.border
+        },
+        tabBarLabelStyle: {
+          fontWeight: "800"
         }
       }}
     >
@@ -36,10 +40,6 @@ export default function RootLayout() {
       <Tabs.Screen
         name="map"
         options={{ title: "Map", tabBarIcon: ({ color }: { color: string }) => <Ionicons name="map" size={22} color={color} /> }}
-      />
-      <Tabs.Screen
-        name="logs"
-        options={{ title: "Logs", tabBarIcon: ({ color }: { color: string }) => <Ionicons name="list" size={22} color={color} /> }}
       />
       <Tabs.Screen
         name="settings"

@@ -1,6 +1,6 @@
 import * as FileSystem from "expo-file-system";
 import * as SQLite from "expo-sqlite";
-import { DriveLog } from "@/types/telephony";
+import { DriveLog, SweetSpot } from "@/types/telephony";
 
 const db = SQLite.openDatabaseSync("telco_rf_monitor.db");
 
@@ -34,6 +34,20 @@ export function initLogStore(): void {
   try {
     db.execSync("ALTER TABLE drive_logs ADD COLUMN altitude REAL;");
   } catch {}
+  db.execSync(`
+    CREATE TABLE IF NOT EXISTS sweet_spots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      operator TEXT NOT NULL,
+      rsrp INTEGER,
+      rsrq INTEGER,
+      pci TEXT,
+      score INTEGER NOT NULL
+    );
+  `);
 }
 
 export async function insertLog(log: DriveLog): Promise<void> {
@@ -96,4 +110,25 @@ export async function exportLogsCsv(): Promise<string> {
   const uri = `${FileSystem.documentDirectory}telco-rf-drive-test-${Date.now()}.csv`;
   await FileSystem.writeAsStringAsync(uri, `${header}\n${body}`);
   return uri;
+}
+
+export async function insertSweetSpot(spot: SweetSpot): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO sweet_spots
+      (name, timestamp, latitude, longitude, operator, rsrp, rsrq, pci, score)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    spot.name,
+    spot.timestamp,
+    spot.latitude,
+    spot.longitude,
+    spot.operator,
+    spot.rsrp,
+    spot.rsrq,
+    spot.pci,
+    spot.score
+  );
+}
+
+export async function getSweetSpots(limit = 500): Promise<SweetSpot[]> {
+  return db.getAllAsync<SweetSpot>("SELECT * FROM sweet_spots ORDER BY timestamp DESC LIMIT ?", limit);
 }

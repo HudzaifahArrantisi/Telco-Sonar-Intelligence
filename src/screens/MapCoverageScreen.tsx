@@ -5,7 +5,8 @@ import WebView from "react-native-webview";
 import type { WebView as WebViewType } from "react-native-webview";
 import { DrivePoint, distanceMeters, initialRfIntelligenceState, RfIntelligenceState, TowerEstimation, updateRfIntelligence } from "@/maps/rfIntelligence";
 import { readActiveWifiSsid, readCells, readLocation, saveCurrentLog } from "@/services/telephonyService";
-import { setLatestCells } from "@/services/runtimeState";
+import { getLatestRuntimeState, setLatestCells } from "@/services/runtimeState";
+import { HUD } from "@/theme/hud";
 import { LocationPoint, Settings, TelephonyCell } from "@/types/telephony";
 import { formatValue, getSignalColor, getSignalStatus } from "@/utils/signal";
 import { SimCardPanel, WifiCard } from "@/components/SimCardPanel";
@@ -37,9 +38,20 @@ type LeafletPayload = {
     sim2: number | null;
   };
   operatorName: string;
+  selectedSimSlot: number;
 };
 
-type TabId = "dashboard" | "tower";
+type TerminalLevel = "I" | "W" | "E";
+
+type TerminalLogLine = {
+  id: string;
+  level: TerminalLevel;
+  tag: string;
+  message: string;
+  timestamp: number;
+};
+
+const MAX_TERMINAL_LINES = 25;
 
 const FALLBACK = { latitude: -6.2, longitude: 106.816666 };
 
@@ -59,8 +71,36 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
   );
   const [followMode, setFollowMode] = useState(true);
   const [driveMode, setDriveMode] = useState(settings.loggingEnabled);
-  const [activeTab, setActiveTab] = useState<TabId>("dashboard");
   const [error, setError] = useState<string | null>(null);
+  const [terminalLogs, setTerminalLogs] = useState<TerminalLogLine[]>(() => [
+    {
+      id: `boot-${Date.now()}`,
+      level: "I",
+      tag: "RfMonitor",
+      message: "live RF terminal attached; filter style: adb logcat *:E",
+      timestamp: Date.now()
+    }
+  ]);
+  const terminalScrollRef = useRef<ScrollView | null>(null);
+  const terminalSequence = useRef(1);
+
+  const appendTerminalLog = useCallback((level: TerminalLevel, tag: string, message: string) => {
+    const timestamp = Date.now();
+    const sequence = terminalSequence.current;
+    terminalSequence.current += 1;
+    setTerminalLogs((current) =>
+      [
+        ...current,
+        {
+          id: `${timestamp}-${level}-${sequence}`,
+          level,
+          tag,
+          message,
+          timestamp
+        }
+      ].slice(-MAX_TERMINAL_LINES)
+    );
+  }, []);
 
   // Group cells by simSlot
   const sim1Cells = useMemo(() => cells.filter((c) => c.simSlot === 0), [cells]);
@@ -108,20 +148,35 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
       setWifiSsid(nextWifi);
       setLatestCells(nextCells, nextLocation);
       
-      setRfState((previous) => updateRfIntelligence(previous, nextCells, nextLocation, settings.defaultRadius, settings.defaultBeamwidth));
+      const currentSettings = getLatestRuntimeState().settings;
+      setRfState((previous) => updateRfIntelligence(previous, nextCells, nextLocation, currentSettings.defaultRadius, currentSettings.defaultBeamwidth));
       
       const registered = nextCells.find((nextCell) => nextCell.simSlot === selectedSimSlot && nextCell.isRegistered) ?? 
                          nextCells.find((nextCell) => nextCell.simSlot === selectedSimSlot) ?? 
                          nextCells.find((nextCell) => nextCell.isRegistered) ?? 
                          nextCells[0];
                          
-      if (registered && (driveMode || settings.loggingEnabled)) {
+      if (registered && (driveMode || currentSettings.loggingEnabled)) {
         await saveCurrentLog(registered, nextLocation);
       }
+
+      if (nextCells.length === 0) {
+        const message = "Android tidak mengembalikan CellInfo. Pastikan perangkat asli, SIM aktif, dan izin lokasi/phone state aktif.";
+        setError(message);
+        appendTerminalLog("W", "CellInfo", message);
+      } else if (registered) {
+        appendTerminalLog(
+          "I",
+          "CellInfo",
+          formatCellLogMessage(registered, nextCells.length, driveMode || currentSettings.loggingEnabled, nextLocation)
+        );
+      }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Gagal memperbarui RF map.");
+      const message = caught instanceof Error ? caught.message : "Gagal memperbarui RF map.";
+      setError(message);
+      appendTerminalLog("E", "TelephonyModule", message);
     }
-  }, [driveMode, selectedSimSlot, settings.defaultBeamwidth, settings.defaultRadius, settings.loggingEnabled]);
+  }, [appendTerminalLog, driveMode, selectedSimSlot]);
 
   useEffect(() => {
     void refresh();
@@ -174,9 +229,10 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
         sim1: distanceToTowerSim1,
         sim2: distanceToTowerSim2
       },
-      operatorName: activeCell?.operatorName || (wifiSsid ? `WiFi: ${wifiSsid}` : "WiFi Network")
+      operatorName: activeCell?.operatorName || (wifiSsid ? `WiFi: ${wifiSsid}` : "WiFi Network"),
+      selectedSimSlot
     }),
-    [activeCell, color, distanceToTowerSim1, distanceToTowerSim2, followMode, origin, routeSegments, sim1Primary, sim2Primary, towerSim1, towerSim2, wifiSsid]
+    [activeCell, color, distanceToTowerSim1, distanceToTowerSim2, followMode, origin, routeSegments, sim1Primary, sim2Primary, towerSim1, towerSim2, wifiSsid, selectedSimSlot]
   );
 
   const sendPayload = useCallback(
@@ -224,31 +280,48 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
 
         {/* Floating Operator Badge */}
         <View style={styles.operatorFloatingBadge}>
-          <Ionicons name={wifiSsid ? "wifi" : "cellular"} size={14} color="#40E0C9" />
+          <Ionicons name={wifiSsid ? "wifi" : "cellular"} size={14} color={HUD.colors.cyan} />
           <Text style={styles.operatorFloatingText} numberOfLines={1}>{activeOperatorTitle}</Text>
         </View>
 
-        {/* Floating label */}
-        <View style={styles.mapOverlayLabel}>
-          <Text style={styles.mapOverlayText}>Azimuth and radius test</Text>
-        </View>
-
+        {/* Transparent Live Logcat Overlay */}
+        <ScrollView
+          ref={terminalScrollRef}
+          style={styles.terminalOverlay}
+          contentContainerStyle={styles.terminalOverlayContent}
+          nestedScrollEnabled
+          showsVerticalScrollIndicator={false}
+          onContentSizeChange={() => terminalScrollRef.current?.scrollToEnd({ animated: true })}
+        >
+          {terminalLogs.map((line) => (
+            <Text
+              key={line.id}
+              style={[
+                styles.terminalLine,
+                line.level === "E" && styles.terminalLineError,
+                line.level === "W" && styles.terminalLineWarn,
+              ]}
+            >
+              {formatLogcatLine(line)}
+            </Text>
+          ))}
+        </ScrollView>
         {/* Floating action buttons */}
         <View style={styles.fabContainer}>
           <Pressable
             onPress={() => setFollowMode((v) => !v)}
             style={[styles.fab, followMode && styles.fabActive]}
           >
-            <Ionicons name={followMode ? "navigate" : "navigate-outline"} color={followMode ? "#061017" : "#F7FBFF"} size={18} />
+            <Ionicons name={followMode ? "navigate" : "navigate-outline"} color={followMode ? HUD.colors.bg : HUD.colors.text} size={18} />
           </Pressable>
           <Pressable onPress={recenter} style={styles.fab}>
-            <Ionicons name="locate" color="#F7FBFF" size={18} />
+            <Ionicons name="locate" color={HUD.colors.text} size={18} />
           </Pressable>
           <Pressable
             onPress={() => setDriveMode((v) => !v)}
             style={[styles.fab, driveMode && styles.fabDrive]}
           >
-            <Ionicons name={driveMode ? "stop-circle" : "radio-button-on"} color={driveMode ? "#FF5F6D" : "#F7FBFF"} size={18} />
+            <Ionicons name={driveMode ? "stop-circle" : "radio-button-on"} color={driveMode ? HUD.colors.amberStrong : HUD.colors.text} size={18} />
           </Pressable>
         </View>
       </View>
@@ -264,46 +337,33 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
           <GpsItem label="Altitude" value={formatAltitude(currentLocation?.altitude)} />
         </View>
 
-        {/* Tab Bar */}
-        <View style={styles.tabBar}>
-          <Pressable
-            onPress={() => setActiveTab("dashboard")}
-            style={[styles.tab, activeTab === "dashboard" && styles.tabActive]}
-          >
-            <Text style={[styles.tabText, activeTab === "dashboard" && styles.tabTextActive]}>DASHBOARD</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setActiveTab("tower")}
-            style={[styles.tab, activeTab === "tower" && styles.tabActive]}
-          >
-            <Text style={[styles.tabText, activeTab === "tower" && styles.tabTextActive]}>CONNECTED TOWER</Text>
-          </Pressable>
-        </View>
-
         {/* Tab Content */}
         <ScrollView style={styles.tabContent} contentContainerStyle={styles.tabContentInner} showsVerticalScrollIndicator={false}>
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
-          {activeTab === "dashboard" ? (
-            <DashboardTab
-              sim1={sim1Primary}
-              sim2={sim2Primary}
-              activeCell={activeCell}
-              color={color}
-              hasCells={cells.length > 0}
-              wifiSsid={wifiSsid}
-              selectedSimSlot={selectedSimSlot}
-              onSelectSim={handleSelectSimSlot}
-            />
-          ) : (
-            <ConnectedTowerTab
-              cell={activeCell}
-              tower={activeTower}
-              towerDistanceM={selectedSimSlot === 1 ? distanceToTowerSim2 : distanceToTowerSim1}
-              rfState={rfState}
-              color={color}
-            />
-          )}
+          <DashboardTab
+            sim1={sim1Primary}
+            sim2={sim2Primary}
+            activeCell={activeCell}
+            color={color}
+            hasCells={cells.length > 0}
+            wifiSsid={wifiSsid}
+            selectedSimSlot={selectedSimSlot}
+            onSelectSim={handleSelectSimSlot}
+          />
+
+          {cells.length > 0 ? (
+            <>
+              <View style={styles.sectionDivider} />
+              <ConnectedTowerTab
+                cell={activeCell}
+                tower={activeTower}
+                towerDistanceM={selectedSimSlot === 1 ? distanceToTowerSim2 : distanceToTowerSim1}
+                rfState={rfState}
+                color={color}
+              />
+            </>
+          ) : null}
         </ScrollView>
       </View>
     </View>
@@ -354,7 +414,7 @@ function DashboardTab({
     <View style={styles.dashboardStack}>
       {wifiSsid ? (
         <View style={styles.wifiStatusStrip}>
-          <Ionicons name="wifi" size={14} color="#40E0C9" />
+          <Ionicons name="wifi" size={14} color={HUD.colors.cyan} />
           <Text style={styles.wifiStatusText} numberOfLines={1}>WiFi: {wifiSsid}</Text>
         </View>
       ) : null}
@@ -442,7 +502,7 @@ function ConnectedTowerTab({
   );
 }
 
-function TowerMetric({ label, value, accent = "#D7E1EA" }: { label: string; value: string; accent?: string }) {
+function TowerMetric({ label, value, accent = HUD.colors.text }: { label: string; value: string; accent?: string }) {
   return (
     <View style={styles.towerMetric}>
       <Text style={styles.towerMetricLabel}>{label}</Text>
@@ -469,17 +529,7 @@ function EventFlag({ label, active }: { label: string; active: boolean }) {
    ========================================================================= */
 
 function buildRouteSegments(points: DrivePoint[]) {
-  return points.slice(1).map((point, index) => ({
-    points: [points[index], point],
-    color: signalColorForRsrp(point.rsrp)
-  }));
-}
-
-function signalColorForRsrp(rsrp: number | null): string {
-  if (typeof rsrp !== "number") return "#7E8A99";
-  if (rsrp >= -95) return "#1FE0A2";
-  if (rsrp >= -105) return "#FFD84D";
-  return "#FF5F6D";
+  return [];
 }
 
 function formatSpeed(speed?: number | null): string {
@@ -497,6 +547,47 @@ function formatGps(location: LocationPoint | null): string {
   return `${location.latitude.toFixed(5)},\n${location.longitude.toFixed(5)}`;
 }
 
+function formatCellLogMessage(
+  cell: TelephonyCell,
+  cellCount: number,
+  loggingEnabled: boolean,
+  location: LocationPoint | null
+): string {
+  const gps = location
+    ? `gps=${location.latitude.toFixed(5)},${location.longitude.toFixed(5)} acc=${formatValue(Math.round(location.accuracy ?? 0), "m")}`
+    : "gps=N/A";
+  const dbm = [
+    `rsrp=${formatValue(cell.rsrp, "dBm")}`,
+    `rsrq=${formatValue(cell.rsrq, "dB")}`,
+    `sinr=${formatValue(cell.sinr, "dB")}`,
+    `ta=${formatValue(cell.timingAdvance)}`
+  ].join(" ");
+  return `cells=${cellCount} sim=${cell.simSlot + 1} ${cell.operatorName || "Unknown"} ${cell.networkType} cell=${formatValue(cell.cellId)} pci=${formatValue(cell.pci)} ${dbm} ${gps} sqlite=${loggingEnabled ? "write" : "off"}`;
+}
+
+function formatLogcatLine(line: TerminalLogLine): string {
+  return `${formatLogTime(line.timestamp)} ${line.level}/${line.tag}( ${processIdForTag(line.tag)}): ${line.message}`;
+}
+
+function formatLogTime(timestamp: number): string {
+  const value = new Date(timestamp);
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const date = String(value.getDate()).padStart(2, "0");
+  const hours = String(value.getHours()).padStart(2, "0");
+  const minutes = String(value.getMinutes()).padStart(2, "0");
+  const seconds = String(value.getSeconds()).padStart(2, "0");
+  const millis = String(value.getMilliseconds()).padStart(3, "0");
+  return `${month}-${date} ${hours}:${minutes}:${seconds}.${millis}`;
+}
+
+function processIdForTag(tag: string): string {
+  let seed = 2400;
+  for (let index = 0; index < tag.length; index += 1) {
+    seed += tag.charCodeAt(index);
+  }
+  return String(seed).padStart(5, " ");
+}
+
 /* =========================================================================
    LEAFLET HTML WITH SONAR ANIMATION & SVG BTS MARKERS
    ========================================================================= */
@@ -510,9 +601,9 @@ const LEAFLET_HTML = `
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
   <style>
-    html, body, #map { height: 100%; margin: 0; background: #061017; }
-    .leaflet-container { background: #061017; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.62) contrast(1.28) saturate(0.7); }
+    html, body, #map { height: 100%; margin: 0; background: #03070A; }
+    .leaflet-container { background: #03070A; font-family: ui-monospace, "Courier New", monospace; }
+    .leaflet-tile-pane { filter: grayscale(0.82) invert(1) hue-rotate(176deg) brightness(0.72) contrast(1.28) saturate(0.48); }
     .leaflet-control-attribution { display: none; }
 
     /* User icon */
@@ -522,18 +613,54 @@ const LEAFLET_HTML = `
       display: flex;
       justify-content: center;
       transform: translate(-50%, -50%);
-      background: rgba(64, 224, 201, 0.24);
-      border: 2px solid rgba(247, 251, 255, 0.9);
-      box-shadow: 0 0 18px rgba(64, 224, 201, 0.5);
+      background: rgba(255, 255, 255, 0.14);
+      border: 2px solid rgba(240, 244, 248, 0.9);
+      box-shadow: 0 0 18px rgba(255, 255, 255, 0.28);
       height: 28px;
       width: 28px;
     }
     .user-icon::after {
-      background: #40E0C9;
+      background: #FFFFFF;
       border-radius: 999px;
       content: "";
       height: 12px;
       width: 12px;
+    }
+
+    /* User marker container */
+    .user-marker-container {
+      position: relative;
+      width: 28px;
+      height: 28px;
+    }
+    
+    /* Transparent Floating Signal Status Bubble above User */
+    .user-signal-bubble {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(3, 7, 10, 0.88);
+      border: 1px solid var(--bubble-color, #FFFFFF);
+      border-radius: 6px;
+      padding: 3px 6px;
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 0 10px var(--bubble-glow, rgba(255, 255, 255, 0.26));
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      z-index: 9999 !important;
+    }
+    .user-signal-text {
+      color: #F0F4F8;
+      font-size: 8px;
+      font-weight: 900;
+      font-family: ui-monospace, "Courier New", monospace;
+      letter-spacing: 0.5px;
+    }
+    .user-signal-icon {
+      font-size: 10px;
     }
 
     /* Premium Futuristic SVG BTS Marker */
@@ -547,11 +674,11 @@ const LEAFLET_HTML = `
       z-index: 1000 !important;
     }
     .bts-icon-premium {
-      background: #0B1B26;
-      border: 2.5px solid var(--bts-border-color, #40E0C9);
-      border-radius: 50%;
-      box-shadow: 0 0 20px var(--bts-glow-color, rgba(64, 224, 201, 0.6));
-      color: var(--bts-border-color, #40E0C9);
+      background: #04090D;
+      border: 2px solid var(--bts-border-color, #FFFFFF);
+      border-radius: 6px;
+      box-shadow: 0 0 18px var(--bts-glow-color, rgba(255, 255, 255, 0.28));
+      color: var(--bts-border-color, #FFFFFF);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -561,12 +688,7 @@ const LEAFLET_HTML = `
       transition: all 0.3s ease;
     }
 
-    /* Sonar animation */
-    @keyframes sonarPulse {
-      0% { transform: translate(-50%, -50%) scale(0.08); opacity: 0.75; }
-      50% { opacity: 0.25; }
-      100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
-    }
+    /* Static Concentric Range Rings (Professional Telecom Style) */
     .sonar-container {
       position: relative;
       width: 320px;
@@ -576,38 +698,62 @@ const LEAFLET_HTML = `
     }
     .sonar-ring {
       position: absolute;
-      border: 2px solid var(--sonar-color, #40E0C9);
+      border: 1px dashed var(--sonar-color, rgba(255, 255, 255, 0.38));
       border-radius: 50%;
-      width: 320px;
-      height: 320px;
       top: 50%;
       left: 50%;
-      animation: sonarPulse 3.5s ease-out infinite;
+      transform: translate(-50%, -50%);
       pointer-events: none;
-      box-shadow: inset 0 0 15px var(--sonar-color, #40E0C9), 0 0 15px var(--sonar-color, #40E0C9);
     }
-    .sonar-ring:nth-child(2) { animation-delay: 1.1s; }
-    .sonar-ring:nth-child(3) { animation-delay: 2.2s; }
+    .sonar-ring:nth-child(1) { width: 100px; height: 100px; }
+    .sonar-ring:nth-child(2) { width: 200px; height: 200px; }
+    .sonar-ring:nth-child(3) { width: 300px; height: 300px; }
     .sonar-ring.ring-fill {
-      background: radial-gradient(circle, transparent 35%, var(--sonar-color, #40E0C9) 100%);
-      opacity: 0.04;
-      border: none;
-      box-shadow: none;
+      display: none;
+    }
+
+    .sweet-spot-marker {
+      align-items: center;
+      background: rgba(57, 255, 20, 0.16);
+      border: 1px solid #39FF14;
+      border-radius: 999px;
+      box-shadow: 0 0 18px rgba(57, 255, 20, 0.72);
+      color: #39FF14;
+      display: flex;
+      font-size: 22px;
+      height: 34px;
+      justify-content: center;
+      transform: translate(-50%, -50%);
+      width: 34px;
+    }
+    .sweet-popup .leaflet-popup-content-wrapper {
+      background: rgba(0, 0, 0, 0.92);
+      border: 1px solid #39FF14;
+      border-radius: 6px;
+      box-shadow: 0 0 18px rgba(57, 255, 20, 0.38);
+      color: #39FF14;
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 11px;
+      font-weight: 900;
+    }
+    .sweet-popup .leaflet-popup-tip {
+      background: #39FF14;
     }
 
     /* Distance label */
     .distance-label {
-      background: rgba(6, 16, 23, 0.92);
-      border: 1px solid #40E0C9;
+      background: rgba(3, 7, 10, 0.9);
+      border: 1px solid #FFFFFF;
       border-radius: 6px;
-      color: #40E0C9;
+      color: #FFFFFF;
+      font-family: ui-monospace, "Courier New", monospace;
       font-size: 11px;
       font-weight: 900;
       padding: 4px 8px;
       white-space: nowrap;
       transform: translate(-50%, -50%);
       pointer-events: none;
-      box-shadow: 0 0 12px rgba(64, 224, 201, 0.45);
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.26);
     }
   </style>
 </head>
@@ -632,6 +778,7 @@ const LEAFLET_HTML = `
     const radiusLayerGroup = L.layerGroup().addTo(map);
     const beamLayerGroup = L.layerGroup().addTo(map);
     const distanceLayerGroup = L.layerGroup().addTo(map);
+    const sweetSpotLayerGroup = L.layerGroup().addTo(map);
     let routeLayerGroup = L.layerGroup().addTo(map);
 
     function latLng(point) {
@@ -675,7 +822,7 @@ const LEAFLET_HTML = `
 
     function sectorPolygon(tower, user) {
       const beamBearing = bearingBetween(tower.location, user);
-      const half = Math.max(16, Math.min(55, tower.beamwidth / 2));
+      const half = tower.beamwidth / 2;
       const left = destination(tower.location, beamBearing - half, tower.radiusMeters);
       const right = destination(tower.location, beamBearing + half, tower.radiusMeters);
       return [tower.location, left, right, tower.location].map(latLng);
@@ -716,19 +863,79 @@ const LEAFLET_HTML = `
       return value >= 1000 ? (value / 1000).toFixed(1) + " km" : value + " m";
     }
 
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
     window.updateRfMap = function(payload) {
-      // User marker
-      userMarker = updateMarker(userMarker, payload.user, "", "user-icon");
+      // Dynamic User marker with distance/radius signal bars
+      const activeKey = payload.selectedSimSlot === 1 ? "sim2" : "sim1";
+      const activeTower = payload.towers ? payload.towers[activeKey] : null;
+      const activeDistance = payload.distancesToTower ? payload.distancesToTower[activeKey] : null;
+
+      let userHtml = '<div class="user-marker-container"><div class="user-icon"></div>';
+      
+      if (activeTower && activeDistance !== null) {
+        const radius = activeTower.radiusMeters;
+        const ratio = activeDistance / radius;
+        let icon = "📵";
+        let statusText = "OUT OF COVERAGE";
+        let bubbleColor = "#B8B8B8";
+        let glowColor = "rgba(255, 255, 255, 0.22)";
+        
+        if (ratio <= 0.25) {
+          icon = "📶 [IIII]";
+          statusText = "EXCELLENT";
+          bubbleColor = "#FFFFFF";
+          glowColor = "rgba(255, 255, 255, 0.28)";
+        } else if (ratio <= 0.50) {
+          icon = "📶 [III.]";
+          statusText = "GOOD";
+          bubbleColor = "#E6E6E6";
+          glowColor = "rgba(255, 255, 255, 0.24)";
+        } else if (ratio <= 0.75) {
+          icon = "📶 [II..]";
+          statusText = "FAIR";
+          bubbleColor = "#CFCFCF";
+          glowColor = "rgba(255, 255, 255, 0.22)";
+        } else if (ratio <= 1.00) {
+          icon = "📶 [I...]";
+          statusText = "POOR";
+          bubbleColor = "#B8B8B8";
+          glowColor = "rgba(255, 255, 255, 0.2)";
+        }
+        
+        userHtml += '<div class="user-signal-bubble" style="--bubble-color: ' + bubbleColor + '; --bubble-glow: ' + glowColor + ';">'
+          + '<span class="user-signal-icon">' + icon + '</span>'
+          + '<span class="user-signal-text">' + statusText + ' (' + Math.round(activeDistance) + 'm / ' + Math.round(radius) + 'm)</span>'
+          + '</div>';
+      } else {
+        userHtml += '<div class="user-signal-bubble" style="--bubble-color: #A7A7A7; --bubble-glow: rgba(255, 255, 255, 0.18);">'
+          + '<span class="user-signal-icon">📵</span>'
+          + '<span class="user-signal-text">NO ACTIVE TOWER</span>'
+          + '</div>';
+      }
+      userHtml += '</div>';
+
+      userMarker = updateMarker(userMarker, payload.user, userHtml, "");
 
       sectorLayerGroup.clearLayers();
       radiusLayerGroup.clearLayers();
       beamLayerGroup.clearLayers();
       distanceLayerGroup.clearLayers();
+      sweetSpotLayerGroup.clearLayers();
 
       ["sim1", "sim2"].forEach(function(key, index) {
         const tower = payload.towers ? payload.towers[key] : null;
         const label = key === "sim1" ? "SIM 1" : "SIM 2";
-        if (!tower) {
+        
+        const activeKey = payload.selectedSimSlot === 1 ? "sim2" : "sim1";
+        if (key !== activeKey || !tower) {
           towerMarkers[key] = removeMarker(towerMarkers[key]);
           sonarMarkers[key] = removeMarker(sonarMarkers[key]);
           return;
@@ -742,33 +949,21 @@ const LEAFLET_HTML = `
           + '</div>';
         towerMarkers[key] = updateMarker(towerMarkers[key], tower.location, towerHtml, "");
 
-        const sonarHtml = '<div class="sonar-container" style="--sonar-color: ' + glowColor + ';">'
-          + '<div class="sonar-ring"></div>'
-          + '<div class="sonar-ring"></div>'
-          + '<div class="sonar-ring"></div>'
-          + '<div class="sonar-ring ring-fill"></div>'
-          + '</div>';
-        const sonarIcon = L.divIcon({ html: sonarHtml, className: "", iconSize: [320, 320] });
-        if (sonarMarkers[key]) {
-          sonarMarkers[key].setLatLng(latLng(tower.location));
-          sonarMarkers[key].setIcon(sonarIcon);
-        } else {
-          sonarMarkers[key] = L.marker(latLng(tower.location), { icon: sonarIcon, interactive: false, zIndexOffset: -100 - index }).addTo(map);
-        }
+        sonarMarkers[key] = removeMarker(sonarMarkers[key]);
 
         L.polygon(sectorPolygon(tower, payload.user), {
-          color: "#3B82F6",
-          fillColor: "#3B82F6",
-          fillOpacity: 0.22,
+          color: "#FFFFFF",
+          fillColor: "#FFFFFF",
+          fillOpacity: 0.12,
           interactive: false,
           opacity: 0.75,
           weight: 2
         }).addTo(sectorLayerGroup);
 
         L.circle(latLng(tower.location), {
-          color: "#FFD84D",
-          fillColor: "#FFD84D",
-          fillOpacity: 0.015,
+          color: "#D7D7D7",
+          fillColor: "#D7D7D7",
+          fillOpacity: 0.012,
           interactive: false,
           radius: tower.radiusMeters,
           weight: 2,
@@ -776,7 +971,7 @@ const LEAFLET_HTML = `
         }).addTo(radiusLayerGroup);
 
         L.polyline([latLng(tower.location), latLng(payload.user)], {
-          color: "#40E0C9",
+          color: "#FFFFFF",
           dashArray: "6 8",
           interactive: false,
           opacity: 0.85,
@@ -824,16 +1019,17 @@ const LEAFLET_HTML = `
    ========================================================================= */
 
 const styles = StyleSheet.create({
-  screen: { backgroundColor: "#061017", flex: 1 },
+  screen: { backgroundColor: HUD.colors.bg, flex: 1 },
 
   /* Map */
   mapContainer: { flex: 1, minHeight: "45%" },
   map: { flex: 1 },
   operatorFloatingBadge: {
+    ...HUD.glow.cyan,
     alignItems: "center",
-    backgroundColor: "rgba(6, 16, 23, 0.88)",
-    borderColor: "#1C3544",
-    borderRadius: 18,
+    backgroundColor: "rgba(3, 7, 10, 0.86)",
+    borderColor: HUD.colors.borderStrong,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flexDirection: "row",
     gap: 6,
@@ -845,11 +1041,11 @@ const styles = StyleSheet.create({
     zIndex: 10,
     maxWidth: 240,
   },
-  operatorFloatingText: { color: "#F7FBFF", fontSize: 12, fontWeight: "900" },
+  operatorFloatingText: { color: HUD.colors.text, fontSize: 12, fontWeight: "900" },
   mapOverlayLabel: {
-    backgroundColor: "rgba(6, 16, 23, 0.82)",
-    borderColor: "#1C3544",
-    borderRadius: 6,
+    backgroundColor: "rgba(3, 7, 10, 0.82)",
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     bottom: 12,
     left: 12,
@@ -857,7 +1053,7 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     position: "absolute",
   },
-  mapOverlayText: { color: "#B9C4CF", fontSize: 11, fontWeight: "700" },
+  mapOverlayText: { color: HUD.colors.textMuted, fontSize: 11, fontWeight: "700" },
 
   /* FABs */
   fabContainer: {
@@ -867,41 +1063,43 @@ const styles = StyleSheet.create({
     right: 12,
   },
   fab: {
+    ...HUD.glow.cyan,
     alignItems: "center",
-    backgroundColor: "rgba(7, 19, 29, 0.88)",
-    borderColor: "#24485C",
-    borderRadius: 24,
+    backgroundColor: "rgba(4, 9, 13, 0.9)",
+    borderColor: HUD.colors.borderStrong,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     height: 42,
     justifyContent: "center",
     width: 42,
   },
-  fabActive: { backgroundColor: "#40E0C9", borderColor: "#40E0C9" },
-  fabDrive: { borderColor: "#FF5F6D" },
+  fabActive: { backgroundColor: HUD.colors.cyan, borderColor: HUD.colors.cyan },
+  fabDrive: { borderColor: HUD.colors.amberStrong },
 
   /* Bottom panel */
   bottomPanel: {
-    backgroundColor: "#07131D",
-    borderTopColor: "#183341",
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.bgAlt,
+    borderTopColor: HUD.colors.border,
     borderTopWidth: 1,
     maxHeight: "55%",
   },
 
   /* GPS Bar */
   gpsBar: {
-    borderBottomColor: "#12242F",
+    borderBottomColor: HUD.colors.border,
     borderBottomWidth: 1,
     flexDirection: "row",
     paddingVertical: 8,
   },
   gpsItem: { alignItems: "center", flex: 1 },
-  gpsLabel: { color: "#5A7A8A", fontSize: 9, fontWeight: "800" },
-  gpsValue: { color: "#F7FBFF", fontSize: 12, fontWeight: "900", marginTop: 2, textAlign: "center" },
-  gpsDivider: { backgroundColor: "#1C3544", width: 1 },
+  gpsLabel: { color: HUD.colors.textMuted, fontSize: 9, fontWeight: "800" },
+  gpsValue: { color: HUD.colors.text, fontFamily: HUD.fonts.mono, fontSize: 12, fontWeight: "900", marginTop: 2, textAlign: "center" },
+  gpsDivider: { backgroundColor: HUD.colors.border, width: 1 },
 
   /* Tab bar */
   tabBar: {
-    borderBottomColor: "#12242F",
+    borderBottomColor: HUD.colors.border,
     borderBottomWidth: 1,
     flexDirection: "row",
   },
@@ -911,16 +1109,16 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   tabActive: {
-    borderBottomColor: "#40E0C9",
+    borderBottomColor: HUD.colors.cyan,
     borderBottomWidth: 2,
   },
   tabText: {
-    color: "#5A7A8A",
+    color: HUD.colors.textMuted,
     fontSize: 11,
     fontWeight: "900",
     letterSpacing: 1,
   },
-  tabTextActive: { color: "#40E0C9" },
+  tabTextActive: { color: HUD.colors.cyan },
 
   /* Tab content */
   tabContent: { flex: 1 },
@@ -930,71 +1128,118 @@ const styles = StyleSheet.create({
   dashboardStack: { gap: 8 },
   simRow: { flexDirection: "row", gap: 8 },
   wifiStatusStrip: {
+    ...HUD.glow.panel,
     alignItems: "center",
-    backgroundColor: "#0B1B26",
-    borderColor: "#1C3544",
-    borderRadius: 6,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flexDirection: "row",
     gap: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
-  wifiStatusText: { color: "#F7FBFF", flex: 1, fontSize: 12, fontWeight: "900" },
+  wifiStatusText: { color: HUD.colors.text, flex: 1, fontSize: 12, fontWeight: "900" },
 
   /* Error */
-  error: { backgroundColor: "#321820", borderRadius: 6, color: "#FFACB6", fontSize: 11, marginBottom: 8, padding: 8 },
+  error: {
+    backgroundColor: "rgba(255, 122, 0, 0.12)",
+    borderColor: HUD.colors.amberStrong,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    color: HUD.colors.amber,
+    fontSize: 11,
+    marginBottom: 8,
+    padding: 8
+  },
 
   /* Connected Tower tab */
   towerTab: { gap: 10 },
   distanceCard: {
+    ...HUD.glow.panel,
     alignItems: "center",
-    backgroundColor: "#0B1B26",
-    borderColor: "#1C3544",
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
     borderLeftWidth: 3,
-    borderRadius: 10,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     flexDirection: "row",
     gap: 12,
     padding: 12,
   },
   distanceInfo: { flex: 1 },
-  distanceLabel: { color: "#5A7A8A", fontSize: 10, fontWeight: "800" },
+  distanceLabel: { color: HUD.colors.textMuted, fontSize: 10, fontWeight: "800" },
   distanceValue: { fontSize: 22, fontWeight: "900", marginTop: 2 },
   confidenceBadge: { alignItems: "center" },
-  confidenceText: { color: "#F7FBFF", fontSize: 16, fontWeight: "900" },
-  confidenceLabel: { color: "#5A7A8A", fontSize: 9, fontWeight: "700" },
+  confidenceText: { color: HUD.colors.text, fontFamily: HUD.fonts.mono, fontSize: 16, fontWeight: "900" },
+  confidenceLabel: { color: HUD.colors.textMuted, fontSize: 9, fontWeight: "700" },
 
   /* Tower metrics grid */
   towerMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   towerMetric: {
-    backgroundColor: "#0B1B26",
-    borderColor: "#1C3544",
-    borderRadius: 6,
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
     borderWidth: 1,
     padding: 7,
     width: "31.5%",
   },
-  towerMetricLabel: { color: "#5A7A8A", fontSize: 8, fontWeight: "800" },
-  towerMetricValue: { fontSize: 12, fontWeight: "900", marginTop: 2 },
+  towerMetricLabel: { color: HUD.colors.textMuted, fontSize: 8, fontWeight: "800" },
+  towerMetricValue: { fontFamily: HUD.fonts.mono, fontSize: 12, fontWeight: "900", marginTop: 2 },
 
   /* Intelligence */
   intelSection: { gap: 8 },
-  intelSectionTitle: { color: "#40E0C9", fontSize: 10, fontWeight: "900", letterSpacing: 1 },
+  intelSectionTitle: { color: HUD.colors.cyan, fontSize: 10, fontWeight: "900", letterSpacing: 1 },
   intelRow: { flexDirection: "row", gap: 8 },
-  intelBadge: { backgroundColor: "#0B1B26", borderColor: "#1C3544", borderRadius: 6, borderWidth: 1, flex: 1, padding: 8 },
-  intelBadgeActive: { borderColor: "#40E0C9" },
-  intelBadgeLabel: { color: "#5A7A8A", fontSize: 9, fontWeight: "800" },
-  intelBadgeValue: { color: "#F7FBFF", fontSize: 11, fontWeight: "900", marginTop: 2 },
+  intelBadge: {
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    flex: 1,
+    padding: 8
+  },
+  intelBadgeActive: { borderColor: HUD.colors.cyan },
+  intelBadgeLabel: { color: HUD.colors.textMuted, fontSize: 9, fontWeight: "800" },
+  intelBadgeValue: { color: HUD.colors.text, fontFamily: HUD.fonts.mono, fontSize: 11, fontWeight: "900", marginTop: 2 },
   eventRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   eventFlag: {
-    backgroundColor: "#111D27",
+    backgroundColor: HUD.colors.panelElevated,
     borderRadius: 5,
-    color: "#718091",
+    color: HUD.colors.textMuted,
     fontSize: 10,
     fontWeight: "900",
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
-  eventFlagActive: { backgroundColor: "#342419", color: "#FFD84D" },
+  eventFlagActive: { backgroundColor: "rgba(255, 159, 28, 0.16)", color: HUD.colors.amber },
+  sectionDivider: { backgroundColor: HUD.colors.border, height: 1, marginVertical: 14 },
+
+  /* Logcat Overlay */
+  terminalOverlay: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: "55%",
+    maxHeight: 130,
+    backgroundColor: "transparent",
+    zIndex: 15,
+  },
+  terminalOverlayContent: {
+    padding: 6,
+    gap: 3,
+  },
+  terminalLine: {
+    color: HUD.colors.phosphor,
+    fontFamily: HUD.fonts.mono,
+    fontSize: 9,
+    lineHeight: 12,
+    textShadowColor: "rgba(0, 0, 0, 0.9)",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 2,
+  },
+  terminalLineError: { color: HUD.colors.phosphor },
+  terminalLineWarn: { color: HUD.colors.phosphor }
 });
