@@ -1,6 +1,8 @@
-const fs = require("fs");
+const fs   = require("fs");
 const path = require("path");
-const { withDangerousMod } = require("@expo/config-plugins");
+const { withDangerousMod, withAndroidManifest } = require("@expo/config-plugins");
+
+// ─── Splash screen vector drawable ─────────────────────────────────────────
 
 const splashVector = `<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -15,14 +17,59 @@ const splashVector = `<?xml version="1.0" encoding="utf-8"?>
 </vector>
 `;
 
+// ─── Helper: ensure an attribute exists on a tag ───────────────────────────
+
+function setAttribute(element, ns, name, value) {
+  if (!element.$) element.$ = {};
+  element.$[`${ns}:${name}`] = value;
+}
+
+// ─── Main plugin export ────────────────────────────────────────────────────
+
 module.exports = function withTelcoRfAndroidResources(config) {
-  return withDangerousMod(config, [
+
+  // 1. Write splash vector drawable
+  config = withDangerousMod(config, [
     "android",
     async (modConfig) => {
-      const drawableDir = path.join(modConfig.modRequest.platformProjectRoot, "app", "src", "main", "res", "drawable");
+      const drawableDir = path.join(
+        modConfig.modRequest.platformProjectRoot,
+        "app", "src", "main", "res", "drawable"
+      );
       fs.mkdirSync(drawableDir, { recursive: true });
       fs.writeFileSync(path.join(drawableDir, "splashscreen_logo.xml"), splashVector);
       return modConfig;
     }
   ]);
+
+  // 2. Inject TelephonyTrackingService into AndroidManifest.xml
+  config = withAndroidManifest(config, (modConfig) => {
+    const manifest     = modConfig.modResults;
+    const application  = manifest.manifest.application?.[0];
+    if (!application) return modConfig;
+
+    // Make sure the services array exists
+    if (!application.service) application.service = [];
+
+    const serviceName = "com.telcorf.telephony.TelephonyTrackingService";
+
+    // Don't add twice if prebuild is run multiple times
+    const alreadyAdded = application.service.some(
+      (s) => s.$?.["android:name"] === serviceName
+    );
+
+    if (!alreadyAdded) {
+      application.service.push({
+        $: {
+          "android:name":                serviceName,
+          "android:exported":            "false",
+          "android:foregroundServiceType": "location",
+        }
+      });
+    }
+
+    return modConfig;
+  });
+
+  return config;
 };

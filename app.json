@@ -18,10 +18,14 @@
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
         "android.permission.READ_PHONE_STATE",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.INTERNET",
-        "android.permission.FOREGROUND_SERVICE"
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED"
       ]
     },
     "plugins": [
@@ -32,7 +36,8 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Telco RF Monitor uses GPS to attach RF measurements to drive-test logs and sector visualizations."
+          "locationAlwaysAndWhenInUsePermission": "Telco RF Monitor uses GPS to attach RF measurements to drive-test logs and sector visualizations.",
+          "locationAlwaysPermission": "Telco RF Monitor needs Always-On location to keep tracking signals in the background."
         }
       ]
     ],

@@ -15,4 +15,11 @@ android {
 
 dependencies {
   implementation project(':expo-modules-core')
+
+  // Kotlin Coroutines — needed by TelephonyTrackingService loop
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3'
+
+  // Fused Location Provider — accurate GPS inside TelephonyTrackingService
+  implementation 'com.google.android.gms:play-services-location:21.3.0'
 }

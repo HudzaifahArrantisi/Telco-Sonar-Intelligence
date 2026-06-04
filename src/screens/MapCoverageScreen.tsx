@@ -1,15 +1,19 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import WebView from "react-native-webview";
 import type { WebView as WebViewType } from "react-native-webview";
+import { router, useNavigation } from "expo-router";
 import { DrivePoint, distanceMeters, initialRfIntelligenceState, RfIntelligenceState, TowerEstimation, updateRfIntelligence } from "@/maps/rfIntelligence";
+import { destinationPoint } from "@/maps/sector";
 import { readActiveWifiSsid, readCells, readLocation, saveCurrentLog } from "@/services/telephonyService";
 import { getLatestRuntimeState, setLatestCells } from "@/services/runtimeState";
+import { buildConnectedTowerRadarSnapshot, ConnectedTowerRadarSnapshot } from "@/services/connectedTowerRadar";
 import { HUD } from "@/theme/hud";
-import { LocationPoint, Settings, TelephonyCell } from "@/types/telephony";
+import { LocationPoint, NeighborTowerPayload, Settings, TelephonyCell, TowerType } from "@/types/telephony";
 import { formatValue, getSignalColor, getSignalStatus } from "@/utils/signal";
 import { SimCardPanel, WifiCard } from "@/components/SimCardPanel";
+import { RfAzimuthRadar } from "@/components/RfAzimuthRadar";
 
 type Props = {
   location: LocationPoint | null;
@@ -18,6 +22,23 @@ type Props = {
 };
 
 type TowerPayload = Pick<TowerEstimation, "location" | "confidence" | "dotted" | "radiusMeters" | "azimuth" | "beamwidth">;
+
+type MonopoleRangePayload = {
+  location: LocationPoint;
+  distanceMeters: number;
+  radiusMeters: number;
+  azimuthDegrees: number;
+  label: string;
+  operatorName: string;
+  networkType: string;
+  cellId: string | null;
+  pci: string | null;
+  address: string;
+  locationText: string;
+  lineStatus: string;
+  source: string;
+  isConnected: boolean;
+};
 
 type LeafletPayload = {
   center: LocationPoint;
@@ -39,6 +60,8 @@ type LeafletPayload = {
   };
   operatorName: string;
   selectedSimSlot: number;
+  neighbors: NeighborTowerPayload[];
+  monopoleRanges: MonopoleRangePayload[];
 };
 
 type TerminalLevel = "I" | "W" | "E";
@@ -51,11 +74,15 @@ type TerminalLogLine = {
   timestamp: number;
 };
 
-const MAX_TERMINAL_LINES = 25;
+const MAX_TERMINAL_LINES = 80;
+const REALTIME_LOG_INTERVAL_MS = 1000;
 
 const FALLBACK = { latitude: -6.2, longitude: 106.816666 };
+const CONNECTED_TOWER_ICON_URI = Image.resolveAssetSource(require("@/img/watchtower.png")).uri;
 
 export function MapCoverageScreen({ location, cells: initialCells, settings }: Props) {
+  const navigation = useNavigation();
+  const [isMonitoringActive, setIsMonitoringActive] = useState(() => getLatestRuntimeState().isMonitoringActive);
   const webViewRef = useRef<WebViewType | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const [cells, setCells] = useState<TelephonyCell[]>(initialCells);
@@ -77,12 +104,14 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
       id: `boot-${Date.now()}`,
       level: "I",
       tag: "RfMonitor",
-      message: "live RF terminal attached; filter style: adb logcat *:E",
+      message: "app-side realtime RF monitor attached; source=TelephonyModule polling",
       timestamp: Date.now()
     }
   ]);
   const terminalScrollRef = useRef<ScrollView | null>(null);
   const terminalSequence = useRef(1);
+  const refreshInFlight = useRef(false);
+  const leafletHtml = useMemo(() => buildLeafletHtml(CONNECTED_TOWER_ICON_URI), []);
 
   const appendTerminalLog = useCallback((level: TerminalLevel, tag: string, message: string) => {
     const timestamp = Date.now();
@@ -124,6 +153,11 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
   const towerSim2 = rfState.towerSim2;
   const activeTower = selectedSimSlot === 1 ? towerSim2 : towerSim1;
   const routeSegments = useMemo(() => buildRouteSegments(rfState.route), [rfState.route]);
+  const radarSnapshot = useMemo(
+    () => buildConnectedTowerRadarSnapshot(cells, currentLocation, selectedSimSlot),
+    [cells, currentLocation, selectedSimSlot]
+  );
+  const monopoleRanges = useMemo(() => buildMonopoleRangePayloads(radarSnapshot), [radarSnapshot]);
 
   const distanceToTowerSim1 = useMemo(() => {
     if (!towerSim1 || !currentLocation) return null;
@@ -135,7 +169,20 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
     return Math.round(distanceMeters(currentLocation, towerSim2.location));
   }, [currentLocation, towerSim2]);
 
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("focus", () => {
+      setIsMonitoringActive(getLatestRuntimeState().isMonitoringActive);
+    });
+    return unsubscribe;
+  }, [navigation]);
+
   const refresh = useCallback(async () => {
+    const active = getLatestRuntimeState().isMonitoringActive;
+    setIsMonitoringActive(active);
+    if (!active) return;
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+
     try {
       setError(null);
       const [nextCells, nextLocation, nextWifi] = await Promise.all([
@@ -175,22 +222,30 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
       const message = caught instanceof Error ? caught.message : "Gagal memperbarui RF map.";
       setError(message);
       appendTerminalLog("E", "TelephonyModule", message);
+    } finally {
+      refreshInFlight.current = false;
     }
   }, [appendTerminalLog, driveMode, selectedSimSlot]);
 
   useEffect(() => {
+    if (!isMonitoringActive) return;
     void refresh();
-  }, [refresh]);
+  }, [refresh, isMonitoringActive]);
 
   useEffect(() => {
-    const intervalMs = Math.max(35, settings.updateIntervalSeconds) * 1000;
-    const timer = setInterval(() => void refresh(), intervalMs);
+    if (!isMonitoringActive) return;
+    const timer = setInterval(() => void refresh(), REALTIME_LOG_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [refresh, settings.updateIntervalSeconds]);
+  }, [refresh, isMonitoringActive]);
 
   const handleSelectSimSlot = useCallback((slot: number) => {
     setSelectedSimSlot(slot);
   }, []);
+
+  const neighborTowers = useMemo(() => {
+    if (!currentLocation) return [];
+    return estimateNeighborTowers(cells, currentLocation);
+  }, [cells, currentLocation]);
 
   const payload = useMemo<LeafletPayload>(
     () => ({
@@ -230,9 +285,11 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
         sim2: distanceToTowerSim2
       },
       operatorName: activeCell?.operatorName || (wifiSsid ? `WiFi: ${wifiSsid}` : "WiFi Network"),
-      selectedSimSlot
+      selectedSimSlot,
+      neighbors: neighborTowers,
+      monopoleRanges
     }),
-    [activeCell, color, distanceToTowerSim1, distanceToTowerSim2, followMode, origin, routeSegments, sim1Primary, sim2Primary, towerSim1, towerSim2, wifiSsid, selectedSimSlot]
+    [activeCell, color, distanceToTowerSim1, distanceToTowerSim2, followMode, monopoleRanges, neighborTowers, origin, routeSegments, sim1Primary, sim2Primary, towerSim1, towerSim2, wifiSsid, selectedSimSlot]
   );
 
   const sendPayload = useCallback(
@@ -259,6 +316,24 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
       ? `${activeCell.operatorName} (${activeCell.networkType})`
       : "Connected via WiFi";
 
+  if (!isMonitoringActive) {
+    return (
+      <View style={styles.warningContainer}>
+        <View style={styles.warningCard}>
+          <Ionicons name="alert-circle" size={48} color={HUD.colors.amber} style={styles.warningIcon} />
+          <Text style={styles.warningTitle}>MONITORING INACTIVE</Text>
+          <Text style={styles.warningDescription}>
+            Aplikasi tidak dapat menampilkan radar sonar seluler karena mesin monitoring sedang dinonaktifkan di halaman Dashboard. Harap aktifkan kembali di Dashboard.
+          </Text>
+          <Pressable style={styles.warningButton} onPress={() => router.navigate("/")}>
+            <Ionicons name="speedometer" size={16} color={HUD.colors.bg} />
+            <Text style={styles.warningButtonText}>Buka Dashboard</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.screen}>
       {/* ====== MAP AREA ====== */}
@@ -266,9 +341,11 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
         <WebView
           ref={webViewRef}
           originWhitelist={["*"]}
-          source={{ html: LEAFLET_HTML }}
+          source={{ html: leafletHtml }}
           javaScriptEnabled
           domStorageEnabled
+          allowFileAccess
+          allowUniversalAccessFromFileURLs
           setSupportMultipleWindows={false}
           onMessage={(event) => {
             if (event.nativeEvent.data === "leaflet-ready") {
@@ -351,6 +428,9 @@ export function MapCoverageScreen({ location, cells: initialCells, settings }: P
             selectedSimSlot={selectedSimSlot}
             onSelectSim={handleSelectSimSlot}
           />
+
+          <View style={styles.sectionDivider} />
+          <RfAzimuthRadar snapshot={radarSnapshot} />
 
           {cells.length > 0 ? (
             <>
@@ -524,12 +604,136 @@ function EventFlag({ label, active }: { label: string; active: boolean }) {
   return <Text style={[styles.eventFlag, active && styles.eventFlagActive]}>{label}</Text>;
 }
 
+function buildMonopoleRangePayloads(snapshot: ConnectedTowerRadarSnapshot): MonopoleRangePayload[] {
+  const ranges: MonopoleRangePayload[] = [];
+
+  [snapshot.connected, ...snapshot.neighbors].forEach((match) => {
+    if (!match || match.locationStatus !== "known") return;
+    const tower = match.tower;
+    if (!tower || tower.towerType !== "monopole" || tower.radio !== "LTE") return;
+    if (typeof match.distanceMeters !== "number" || typeof match.azimuthDegrees !== "number") return;
+    const locationText = formatTowerLocation(tower.address, tower.latitude, tower.longitude);
+
+    ranges.push({
+      location: {
+        latitude: tower.latitude,
+        longitude: tower.longitude
+      },
+      distanceMeters: match.distanceMeters,
+      radiusMeters: Math.max(20, match.distanceMeters),
+      azimuthDegrees: match.azimuthDegrees,
+      label: tower.label ?? "Monopole tower",
+      operatorName: match.cell.operatorName || "Unknown",
+      networkType: match.cell.networkType,
+      cellId: match.cell.cellId,
+      pci: match.cell.pci,
+      address: tower.address ?? locationText,
+      locationText,
+      lineStatus: match.isConnected ? "USER CONNECTED TO LTE MONOPOLE" : "LTE MONOPOLE OBSERVED",
+      source: tower.source,
+      isConnected: match.isConnected
+    });
+  });
+
+  return ranges;
+}
+
+function formatTowerLocation(address: string | undefined, latitude: number, longitude: number): string {
+  if (address && address.trim().length > 0) return address;
+  return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+}
+
 /* =========================================================================
    HELPERS
    ========================================================================= */
 
 function buildRouteSegments(points: DrivePoint[]) {
   return [];
+}
+
+/* ─── Tower Classification & Estimation ──────────────────────────────────── */
+
+function classifyTowerType(cell: TelephonyCell): TowerType {
+  const nt = cell.networkType;
+  if (nt === "NR" || nt === "5G SA" || nt === "5G NSA") return "5G_POLE";
+  if (nt === "LTE") {
+    // Small cells typically have very strong signals (close range, indoor)
+    if (typeof cell.rsrp === "number" && cell.rsrp >= -75 && !cell.isRegistered) return "SMALL_CELL";
+    return "LTE_MONOPOLE";
+  }
+  // GSM / WCDMA legacy towers
+  return "LTE_MONOPOLE";
+}
+
+/**
+ * Deterministic bearing from PCI value.
+ * Ensures same PCI always appears at the same angular position on the radar.
+ */
+function bearingFromPci(pci: string | null, index: number): number {
+  if (pci) {
+    const pciNum = parseInt(pci, 10);
+    if (!isNaN(pciNum)) return (pciNum * 37 + pciNum * 13) % 360;
+  }
+  // Fallback: distribute evenly using index
+  return (index * 47 + 15) % 360;
+}
+
+/**
+ * Estimate distance to tower based on RSRP heuristic.
+ * Stronger signal = closer tower.
+ */
+function distanceFromRsrp(rsrp: number | null): number {
+  if (typeof rsrp !== "number") return 1200;
+  if (rsrp >= -65) return 80;    // Femtocell / indoor repeater
+  if (rsrp >= -75) return 150;   // Small cell / pole
+  if (rsrp >= -85) return 350;   // Close macro tower
+  if (rsrp >= -95) return 700;   // Medium distance
+  if (rsrp >= -105) return 1200; // Far
+  if (rsrp >= -115) return 2000; // Very far
+  return 3000;                    // Edge of coverage
+}
+
+/**
+ * Build NeighborTowerPayload array from all detected cells.
+ * Includes both serving and neighbor cells — each gets an estimated GPS location.
+ */
+function estimateNeighborTowers(
+  cells: TelephonyCell[],
+  userLocation: LocationPoint
+): NeighborTowerPayload[] {
+  // Deduplicate by PCI to avoid overlapping icons for the same physical tower
+  const seen = new Set<string>();
+  const result: NeighborTowerPayload[] = [];
+
+  cells.forEach((cell, index) => {
+    const key = `${cell.simSlot}-${cell.pci ?? cell.cellId ?? index}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    const bearing = bearingFromPci(cell.pci, index);
+    const dist = distanceFromRsrp(cell.rsrp);
+    const estimatedLocation = destinationPoint(userLocation, bearing, dist);
+    const towerType = classifyTowerType(cell);
+
+    result.push({
+      location: estimatedLocation,
+      bearing,
+      distanceMeters: dist,
+      towerType,
+      isServing: cell.isRegistered,
+      networkType: cell.networkType,
+      operatorName: cell.operatorName,
+      pci: cell.pci,
+      cellId: cell.cellId,
+      band: cell.band,
+      rsrp: cell.rsrp,
+      rsrq: cell.rsrq,
+      sinr: cell.sinr,
+      simSlot: cell.simSlot
+    });
+  });
+
+  return result;
 }
 
 function formatSpeed(speed?: number | null): string {
@@ -592,7 +796,8 @@ function processIdForTag(tag: string): string {
    LEAFLET HTML WITH SONAR ANIMATION & SVG BTS MARKERS
    ========================================================================= */
 
-const LEAFLET_HTML = `
+function buildLeafletHtml(connectedTowerIconUri: string): string {
+  return `
 <!doctype html>
 <html>
 <head>
@@ -663,29 +868,35 @@ const LEAFLET_HTML = `
       font-size: 10px;
     }
 
-    /* Premium Futuristic SVG BTS Marker */
+    /* Connected BTS marker */
     .bts-marker-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 50px;
+      height: 50px;
+      transform: translate(-50%, -50%);
+      z-index: 1000 !important;
+    }
+    .bts-icon-premium {
+      background: rgba(3, 7, 10, 0.18);
+      border: 2px solid var(--bts-border-color, #FFFFFF);
+      border-radius: 999px;
+      box-shadow: 0 0 18px var(--bts-glow-color, rgba(255, 255, 255, 0.28));
       display: flex;
       align-items: center;
       justify-content: center;
       width: 44px;
       height: 44px;
-      transform: translate(-50%, -50%);
-      z-index: 1000 !important;
-    }
-    .bts-icon-premium {
-      background: #04090D;
-      border: 2px solid var(--bts-border-color, #FFFFFF);
-      border-radius: 6px;
-      box-shadow: 0 0 18px var(--bts-glow-color, rgba(255, 255, 255, 0.28));
-      color: var(--bts-border-color, #FFFFFF);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      padding: 6px;
+      overflow: hidden;
+      padding: 0;
       transition: all 0.3s ease;
+    }
+    .bts-icon-image {
+      display: block;
+      height: 100%;
+      object-fit: cover;
+      width: 100%;
     }
 
     /* Static Concentric Range Rings (Professional Telecom Style) */
@@ -755,11 +966,174 @@ const LEAFLET_HTML = `
       pointer-events: none;
       box-shadow: 0 0 12px rgba(255, 255, 255, 0.26);
     }
+
+    .monopole-radius-label {
+      background: rgba(3, 7, 10, 0.92);
+      border: 1px solid #D7D7D7;
+      border-radius: 6px;
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.24);
+      color: #F5F5F5;
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 9px;
+      font-weight: 900;
+      padding: 4px 7px;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      white-space: nowrap;
+    }
+    .monopole-radius-label.is-connected {
+      border-color: #39FF14;
+      color: #39FF14;
+    }
+    .monopole-line-status {
+      background: rgba(3, 7, 10, 0.94);
+      border: 1px solid #39FF14;
+      border-radius: 6px;
+      box-shadow: 0 0 14px rgba(57, 255, 20, 0.26);
+      color: #39FF14;
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 9px;
+      font-weight: 900;
+      line-height: 1.35;
+      max-width: 220px;
+      padding: 5px 7px;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      white-space: normal;
+    }
+    .monopole-line-status .muted,
+    .monopole-location-label .muted {
+      color: #D7D7D7;
+      display: block;
+      font-size: 8px;
+      margin-top: 2px;
+    }
+    .monopole-location-label {
+      background: rgba(3, 7, 10, 0.94);
+      border: 1px solid #D7D7D7;
+      border-radius: 6px;
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.2);
+      color: #F5F5F5;
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 8px;
+      font-weight: 900;
+      line-height: 1.35;
+      max-width: 230px;
+      padding: 5px 7px;
+      pointer-events: none;
+      transform: translate(-50%, -115%);
+      white-space: normal;
+    }
+
+    /* ── Neighbor / Small Cell Tower Markers ────────────────────── */
+    .neighbor-tower-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transform: translate(-50%, -50%);
+      z-index: 800 !important;
+    }
+    .neighbor-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(4, 9, 13, 0.92);
+      border-radius: 5px;
+      padding: 3px;
+      transition: all 0.3s ease;
+    }
+    .neighbor-icon.type-5g {
+      border: 1.5px solid #00F0FF;
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.35);
+      width: 30px; height: 30px;
+    }
+    .neighbor-icon.type-lte {
+      border: 1.5px solid #FFB000;
+      border-radius: 999px;
+      box-shadow: 0 0 10px rgba(255, 176, 0, 0.3);
+      overflow: hidden;
+      padding: 0;
+      width: 34px; height: 34px;
+    }
+    .neighbor-tower-image {
+      display: block;
+      height: 100%;
+      object-fit: cover;
+      width: 100%;
+    }
+    .neighbor-icon.type-small {
+      border: 1.5px solid #39FF14;
+      box-shadow: 0 0 8px rgba(57, 255, 20, 0.3);
+      width: 22px; height: 22px;
+    }
+    .neighbor-icon.type-mw {
+      border: 1.5px solid #E040FB;
+      box-shadow: 0 0 12px rgba(224, 64, 251, 0.35);
+      width: 28px; height: 28px;
+    }
+    .neighbor-icon.is-serving {
+      border-width: 2.5px;
+      filter: brightness(1.3);
+    }
+    .neighbor-label {
+      position: absolute;
+      bottom: -14px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 7px;
+      font-weight: 900;
+      white-space: nowrap;
+      pointer-events: none;
+      text-shadow: 0 0 4px rgba(0,0,0,0.9);
+    }
+    .neighbor-label.type-5g { color: #00F0FF; }
+    .neighbor-label.type-lte { color: #FFB000; }
+    .neighbor-label.type-small { color: #39FF14; }
+    .neighbor-label.type-mw { color: #E040FB; }
+
+    /* Popup styling for neighbor towers */
+    .neighbor-popup .leaflet-popup-content-wrapper {
+      background: rgba(3, 7, 10, 0.94);
+      border: 1px solid #3A3F47;
+      border-radius: 6px;
+      box-shadow: 0 0 18px rgba(0, 240, 255, 0.22);
+      color: #F0F4F8;
+      font-family: ui-monospace, "Courier New", monospace;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 0;
+    }
+    .neighbor-popup .leaflet-popup-tip {
+      background: #3A3F47;
+    }
+    .neighbor-popup .leaflet-popup-content {
+      margin: 8px 10px;
+      line-height: 1.5;
+    }
+    .popup-title {
+      font-size: 11px;
+      font-weight: 900;
+      margin-bottom: 4px;
+      letter-spacing: 0.5px;
+    }
+    .popup-title.type-5g { color: #00F0FF; }
+    .popup-title.type-lte { color: #FFB000; }
+    .popup-title.type-small { color: #39FF14; }
+    .popup-title.type-mw { color: #E040FB; }
+    .popup-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .popup-label { color: #8B929A; }
+    .popup-value { color: #F0F4F8; font-weight: 900; }
   </style>
 </head>
 <body>
   <div id="map"></div>
   <script>
+    const CONNECTED_TOWER_ICON_URI = ${JSON.stringify(connectedTowerIconUri)};
     const map = L.map("map", {
       zoomControl: false,
       attributionControl: false,
@@ -779,7 +1153,38 @@ const LEAFLET_HTML = `
     const beamLayerGroup = L.layerGroup().addTo(map);
     const distanceLayerGroup = L.layerGroup().addTo(map);
     const sweetSpotLayerGroup = L.layerGroup().addTo(map);
+    const neighborLayerGroup = L.layerGroup().addTo(map);
+    const monopoleRangeLayerGroup = L.layerGroup().addTo(map);
     let routeLayerGroup = L.layerGroup().addTo(map);
+
+    // ── SVG Icon Generators for different tower types ──
+    const TOWER_5G_SVG = (color) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<line x1="12" y1="3" x2="12" y2="21"></line>'
+      + '<path d="M15.5 6c1.2 1.2 1.2 3 0 4.2"></path>'
+      + '<path d="M17.5 4c2.2 2.2 2.2 5.6 0 7.8"></path>'
+      + '<path d="M8.5 6c-1.2 1.2-1.2 3 0 4.2"></path>'
+      + '<path d="M6.5 4c-2.2 2.2-2.2 5.6 0 7.8"></path>'
+      + '<circle cx="12" cy="7" r="1" fill="' + color + '"></circle>'
+      + '<text x="12" y="20" text-anchor="middle" fill="' + color + '" font-size="5" font-weight="900" font-family="monospace">5G</text>'
+      + '</svg>';
+
+    const TOWER_LTE_SVG = () => '<img class="neighbor-tower-image" src="' + CONNECTED_TOWER_ICON_URI + '" alt="LTE tower" />';
+
+    const TOWER_SMALL_SVG = (color) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<circle cx="12" cy="8" r="3"></circle>'
+      + '<circle cx="12" cy="8" r="1" fill="' + color + '"></circle>'
+      + '<line x1="12" y1="11" x2="12" y2="20"></line>'
+      + '<line x1="9" y1="20" x2="15" y2="20"></line>'
+      + '</svg>';
+
+    const TOWER_MW_SVG = (color) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+      + '<rect x="8" y="4" width="8" height="5" rx="1" fill="none"></rect>'
+      + '<circle cx="12" cy="6.5" r="1" fill="' + color + '"></circle>'
+      + '<line x1="12" y1="9" x2="12" y2="22"></line>'
+      + '<path d="M9 22l3-4 3 4"></path>'
+      + '<path d="M5 6.5 L8 6.5" stroke-dasharray="2 2"></path>'
+      + '<path d="M16 6.5 L19 6.5" stroke-dasharray="2 2"></path>'
+      + '</svg>';
 
     function latLng(point) {
       return [point.latitude, point.longitude];
@@ -827,17 +1232,6 @@ const LEAFLET_HTML = `
       const right = destination(tower.location, beamBearing + half, tower.radiusMeters);
       return [tower.location, left, right, tower.location].map(latLng);
     }
-
-    // Futuristic SVG cell tower icon
-    const TOWER_SVG = (color) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-      + '<line x1="12" y1="2" x2="12" y2="22"></line>'
-      + '<path d="M17 5c1.8 1.8 1.8 4.6 0 6.4"></path>'
-      + '<path d="M19 2c3.5 3.5 3.5 9.1 0 12.7"></path>'
-      + '<path d="M7 5c-1.8 1.8-1.8 4.6 0 6.4"></path>'
-      + '<path d="M5 2c-3.5 3.5-3.5 9.1 0 12.7"></path>'
-      + '<circle cx="12" cy="8" r="1.5" fill="' + color + '"></circle>'
-      + '<path d="M8 22l4-6 4 6"></path>'
-      + '</svg>';
 
     function updateMarker(existing, point, html, className) {
       const icon = L.divIcon({ html, className, iconSize: [1, 1] });
@@ -929,6 +1323,7 @@ const LEAFLET_HTML = `
       beamLayerGroup.clearLayers();
       distanceLayerGroup.clearLayers();
       sweetSpotLayerGroup.clearLayers();
+      monopoleRangeLayerGroup.clearLayers();
 
       ["sim1", "sim2"].forEach(function(key, index) {
         const tower = payload.towers ? payload.towers[key] : null;
@@ -944,7 +1339,7 @@ const LEAFLET_HTML = `
         const glowColor = colorForTower(payload, key);
         const towerHtml = '<div class="bts-marker-container" style="--bts-border-color: ' + glowColor + '; --bts-glow-color: ' + glowColor + '42;">'
           + '<div class="bts-icon-premium">'
-          + TOWER_SVG(glowColor)
+          + '<img class="bts-icon-image" src="' + CONNECTED_TOWER_ICON_URI + '" alt="Connected tower" />'
           + '</div>'
           + '</div>';
         towerMarkers[key] = updateMarker(towerMarkers[key], tower.location, towerHtml, "");
@@ -987,6 +1382,141 @@ const LEAFLET_HTML = `
         L.marker(midPoint(payload.user, tower.location), { icon: distIcon, interactive: false }).addTo(distanceLayerGroup);
       });
 
+      // Local database monopole radius rings. Radius equals live user-to-tower distance.
+      if (payload.monopoleRanges && payload.monopoleRanges.length > 0) {
+        payload.monopoleRanges.forEach(function(range) {
+          if (!range || !range.location || range.radiusMeters === null || range.radiusMeters === undefined) return;
+          var rangeColor = range.isConnected ? '#39FF14' : 'rgba(255,255,255,0.42)';
+          var lineStatusHtml = '<div class="monopole-line-status">'
+            + escapeHtml(range.lineStatus || 'LTE MONOPOLE LINK')
+            + '<span class="muted">radius/jarak ' + escapeHtml(formatDistance(range.distanceMeters)) + ' | azimuth ' + escapeHtml(String(range.azimuthDegrees)) + ' deg</span>'
+            + '</div>';
+          var locationHtml = '<div class="monopole-location-label">'
+            + 'LOKASI LTE MONOPOLE'
+            + '<span class="muted">' + escapeHtml(range.locationText || range.address || 'Unknown location') + '</span>'
+            + '</div>';
+
+          L.circle(latLng(range.location), {
+            color: rangeColor,
+            dashArray: range.isConnected ? '5 5' : '2 7',
+            fillColor: rangeColor,
+            fillOpacity: range.isConnected ? 0.035 : 0.012,
+            interactive: false,
+            opacity: range.isConnected ? 0.85 : 0.45,
+            radius: Math.max(20, range.radiusMeters),
+            weight: range.isConnected ? 2 : 1
+          }).addTo(monopoleRangeLayerGroup);
+
+          L.polyline([latLng(payload.user), latLng(range.location)], {
+            color: rangeColor,
+            dashArray: range.isConnected ? '8 5' : '3 7',
+            interactive: false,
+            opacity: range.isConnected ? 0.85 : 0.45,
+            weight: range.isConnected ? 2 : 1
+          }).addTo(monopoleRangeLayerGroup);
+
+          var lineStatusIcon = L.divIcon({
+            html: lineStatusHtml,
+            className: '',
+            iconSize: [1, 1]
+          });
+          L.marker(midPoint(payload.user, range.location), { icon: lineStatusIcon, interactive: false }).addTo(monopoleRangeLayerGroup);
+
+          var locationIcon = L.divIcon({
+            html: locationHtml,
+            className: '',
+            iconSize: [1, 1]
+          });
+          L.marker(latLng(range.location), { icon: locationIcon, interactive: false }).addTo(monopoleRangeLayerGroup);
+        });
+      }
+
+      // ── Neighbor Towers (All Detected Cells) ──
+      neighborLayerGroup.clearLayers();
+      if (payload.neighbors && payload.neighbors.length > 0) {
+        payload.neighbors.forEach(function(nb) {
+          var cssType = 'type-lte';
+          var svgFn = TOWER_LTE_SVG;
+          var iconColor = '#FFB000';
+          var towerLabel = 'LTE MONOPOLE';
+          if (nb.towerType === '5G_POLE') {
+            cssType = 'type-5g';
+            svgFn = TOWER_5G_SVG;
+            iconColor = '#00F0FF';
+            towerLabel = '5G POLE';
+          } else if (nb.towerType === 'SMALL_CELL') {
+            cssType = 'type-small';
+            svgFn = TOWER_SMALL_SVG;
+            iconColor = '#39FF14';
+            towerLabel = 'SMALL CELL';
+          } else if (nb.towerType === 'MICROWAVE_HUB') {
+            cssType = 'type-mw';
+            svgFn = TOWER_MW_SVG;
+            iconColor = '#E040FB';
+            towerLabel = 'MICROWAVE';
+          }
+
+          var servingClass = nb.isServing ? ' is-serving' : '';
+          var statusTag = nb.isServing ? '<span style="color:' + iconColor + ';">■ SERVING</span>' : '<span style="color:#8B929A;">○ NEIGHBOR</span>';
+
+          // Icon marker
+          var iconHtml = '<div class="neighbor-tower-container">'
+            + '<div class="neighbor-icon ' + cssType + servingClass + '">'
+            + svgFn(iconColor)
+            + '</div>'
+            + '<div class="neighbor-label ' + cssType + '">' + towerLabel + '</div>'
+            + '</div>';
+
+          var icon = L.divIcon({ html: iconHtml, className: '', iconSize: [1, 1] });
+          var marker = L.marker(latLng(nb.location), { icon: icon, interactive: true }).addTo(neighborLayerGroup);
+
+          // Popup with RF details
+          var popupHtml = '<div class="popup-title ' + cssType + '">' + towerLabel + ' — ' + escapeHtml(nb.operatorName) + '</div>'
+            + '<div>' + statusTag + ' | SIM ' + (nb.simSlot + 1) + '</div>'
+            + '<div class="popup-row"><span class="popup-label">Network</span><span class="popup-value">' + escapeHtml(nb.networkType) + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">PCI</span><span class="popup-value">' + (nb.pci || 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">Cell ID</span><span class="popup-value">' + (nb.cellId || 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">Band</span><span class="popup-value">' + (nb.band || 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">RSRP</span><span class="popup-value" style="color:' + iconColor + ';">' + (nb.rsrp !== null ? nb.rsrp + ' dBm' : 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">RSRQ</span><span class="popup-value">' + (nb.rsrq !== null ? nb.rsrq + ' dB' : 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">SINR</span><span class="popup-value">' + (nb.sinr !== null ? nb.sinr + ' dB' : 'N/A') + '</span></div>'
+            + '<div class="popup-row"><span class="popup-label">Est. Distance</span><span class="popup-value">' + formatDistance(nb.distanceMeters) + '</span></div>';
+          marker.bindPopup(popupHtml, { className: 'neighbor-popup', maxWidth: 200 });
+
+          // Dashed line from user to neighbor tower
+          var lineColor = nb.isServing ? iconColor : 'rgba(255,255,255,0.25)';
+          var lineWeight = nb.isServing ? 2 : 1;
+          L.polyline([latLng(payload.user), latLng(nb.location)], {
+            color: lineColor,
+            dashArray: nb.isServing ? '6 4' : '3 6',
+            interactive: false,
+            opacity: nb.isServing ? 0.7 : 0.35,
+            weight: lineWeight
+          }).addTo(neighborLayerGroup);
+
+          // Microwave backhaul beam from serving tower (aesthetic simulation)
+          if (nb.isServing) {
+            var mwBearing = (nb.bearing + 180) % 360;
+            var mwDist = nb.distanceMeters * 2.5;
+            var mwHub = destination(nb.location, mwBearing, mwDist);
+            L.polyline([latLng(nb.location), [mwHub.latitude, mwHub.longitude]], {
+              color: '#E040FB',
+              dashArray: '2 6',
+              interactive: false,
+              opacity: 0.3,
+              weight: 1
+            }).addTo(neighborLayerGroup);
+
+            // Microwave hub icon at the end
+            var mwIconHtml = '<div class="neighbor-tower-container"><div class="neighbor-icon type-mw" style="width:20px;height:20px;">'
+              + TOWER_MW_SVG('#E040FB')
+              + '</div><div class="neighbor-label type-mw">MW HUB</div></div>';
+            var mwIcon = L.divIcon({ html: mwIconHtml, className: '', iconSize: [1, 1] });
+            L.marker([mwHub.latitude, mwHub.longitude], { icon: mwIcon, interactive: false }).addTo(neighborLayerGroup);
+          }
+        });
+      }
+
       // Route segments
       routeLayerGroup.clearLayers();
       payload.route.forEach(function(segment) {
@@ -1013,6 +1543,7 @@ const LEAFLET_HTML = `
 </body>
 </html>
 `;
+}
 
 /* =========================================================================
    STYLES
@@ -1241,5 +1772,64 @@ const styles = StyleSheet.create({
     textShadowRadius: 2,
   },
   terminalLineError: { color: HUD.colors.phosphor },
-  terminalLineWarn: { color: HUD.colors.phosphor }
+  terminalLineWarn: { color: HUD.colors.phosphor },
+
+  /* Warning Container when monitoring is stopped */
+  warningContainer: {
+    alignItems: "center",
+    backgroundColor: HUD.colors.bg,
+    flex: 1,
+    justifyContent: "center",
+    padding: 24
+  },
+  warningCard: {
+    ...HUD.glow.panel,
+    alignItems: "center",
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    padding: 24,
+    width: "100%",
+    maxWidth: 340
+  },
+  warningIcon: {
+    marginBottom: 16,
+    shadowColor: HUD.colors.amber,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10
+  },
+  warningTitle: {
+    color: HUD.colors.text,
+    fontFamily: HUD.fonts.mono,
+    fontSize: 16,
+    fontWeight: "900",
+    letterSpacing: 1,
+    marginBottom: 10,
+    textAlign: "center"
+  },
+  warningDescription: {
+    color: HUD.colors.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 20,
+    textAlign: "center"
+  },
+  warningButton: {
+    ...HUD.glow.cyan,
+    alignItems: "center",
+    backgroundColor: HUD.colors.cyan,
+    borderRadius: HUD.radius,
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "center",
+    minHeight: 44,
+    width: "100%"
+  },
+  warningButtonText: {
+    color: HUD.colors.bg,
+    fontSize: 13,
+    fontWeight: "900"
+  }
 });

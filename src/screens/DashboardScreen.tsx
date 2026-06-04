@@ -13,6 +13,15 @@ import { readCells, readLocation, saveCurrentLog } from "@/services/telephonySer
 import { HUD } from "@/theme/hud";
 import { Settings, TelephonyCell, LocationPoint } from "@/types/telephony";
 import { formatValue, getSignalStatus } from "@/utils/signal";
+import { 
+  startCellListenerAsync, 
+  stopCellListenerAsync, 
+  startTrackingServiceAsync, 
+  stopTrackingServiceAsync,
+  startBatteryMonitorAsync,
+  stopBatteryMonitorAsync 
+} from "@/native/TelephonyModule";
+import { getLatestRuntimeState, setMonitoringActive } from "@/services/runtimeState";
 
 type Props = {
   settings: Settings;
@@ -42,7 +51,7 @@ type SignalHealth = {
 export function DashboardScreen({ settings, onCells }: Props) {
   const [cells, setCells] = useState<TelephonyCell[]>([]);
   const [location, setLocation] = useState<LocationPoint | null>(null);
-  const [monitoring, setMonitoring] = useState(true);
+  const [monitoring, setMonitoring] = useState(() => getLatestRuntimeState().isMonitoringActive);
   const [error, setError] = useState<string | null>(null);
   const [compassHeading, setCompassHeading] = useState<number | null>(null);
   const [compassError, setCompassError] = useState(false);
@@ -169,6 +178,21 @@ export function DashboardScreen({ settings, onCells }: Props) {
     );
   }, [beepEnabled, beepIntervalMs]);
 
+  useEffect(() => {
+    setMonitoringActive(monitoring);
+    if (monitoring) {
+      void startCellListenerAsync().catch(() => {});
+      void startBatteryMonitorAsync().catch(() => {});
+      void startTrackingServiceAsync().catch(() => {});
+      appendTerminalLog("I", "System", "All monitoring engines STARTED.");
+    } else {
+      void stopCellListenerAsync().catch(() => {});
+      void stopBatteryMonitorAsync().catch(() => {});
+      void stopTrackingServiceAsync().catch(() => {});
+      appendTerminalLog("W", "System", "All monitoring engines STOPPED.");
+    }
+  }, [monitoring, appendTerminalLog]);
+
   async function saveLog() {
     if (primaryCell) await saveCurrentLog(primaryCell, location);
   }
@@ -276,11 +300,52 @@ export function DashboardScreen({ settings, onCells }: Props) {
         />
       </View>
 
-      <View style={styles.actions}>
-        <PrimaryButton title="Start Monitoring" onPress={() => setMonitoring(true)} />
-        <PrimaryButton title="Stop Monitoring" tone="secondary" onPress={() => setMonitoring(false)} />
-        <PrimaryButton title="Refresh Now" tone="secondary" onPress={() => void refresh()} />
-        <PrimaryButton title="Save Log" tone="secondary" onPress={() => void saveLog()} />
+      {/* Monitoring Status & Control Panel */}
+      <View style={styles.monitoringControl}>
+        <View style={styles.statusRow}>
+          <View style={[styles.statusDot, monitoring ? styles.statusDotActive : styles.statusDotPaused]} />
+          <Text style={styles.statusText}>
+            {monitoring 
+              ? `LIVE MONITORING ACTIVE (Update ${settings.updateIntervalSeconds}s)` 
+              : "MONITORING PAUSED (Real-time update stopped)"}
+          </Text>
+        </View>
+
+        {monitoring ? (
+          <PrimaryButton
+            title="Stop Monitoring"
+            tone="danger"
+            icon={<Ionicons name="pause-circle" size={18} color={HUD.colors.text} />}
+            onPress={() => setMonitoring(false)}
+          />
+        ) : (
+          <PrimaryButton
+            title="Start Monitoring"
+            tone="primary"
+            icon={<Ionicons name="play-circle" size={18} color={HUD.colors.bg} />}
+            onPress={() => setMonitoring(true)}
+          />
+        )}
+      </View>
+
+      {/* Quick Actions Row */}
+      <View style={styles.actionRow}>
+        <View style={styles.actionCol}>
+          <PrimaryButton
+            title="Refresh Now"
+            tone="secondary"
+            icon={<Ionicons name="refresh" size={16} color={HUD.colors.textMuted} />}
+            onPress={() => void refresh()}
+          />
+        </View>
+        <View style={styles.actionCol}>
+          <PrimaryButton
+            title="Save Log"
+            tone="secondary"
+            icon={<Ionicons name="save-outline" size={16} color={HUD.colors.textMuted} />}
+            onPress={() => void saveLog()}
+          />
+        </View>
       </View>
 
       <View style={styles.simBlock}>
@@ -924,7 +989,54 @@ const styles = StyleSheet.create({
     padding: 12
   },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  actions: { gap: 10 },
+  monitoringControl: {
+    ...HUD.glow.panel,
+    backgroundColor: HUD.colors.panel,
+    borderColor: HUD.colors.border,
+    borderRadius: HUD.radius,
+    borderWidth: 1,
+    gap: 12,
+    padding: 14
+  },
+  statusRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8
+  },
+  statusDot: {
+    borderRadius: 999,
+    height: 8,
+    width: 8
+  },
+  statusDotActive: {
+    backgroundColor: "#39FF14",
+    shadowColor: "#39FF14",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 6
+  },
+  statusDotPaused: {
+    backgroundColor: "#FF4D4D",
+    shadowColor: "#FF4D4D",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 6
+  },
+  statusText: {
+    color: HUD.colors.text,
+    fontFamily: HUD.fonts.mono,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.5
+  },
+  actionRow: {
+    flexDirection: "row",
+    gap: 10
+  },
+  actionCol: {
+    flex: 1
+  },
+
   simBlock: {
     ...HUD.glow.panel,
     backgroundColor: HUD.colors.panel,
